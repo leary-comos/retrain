@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install package and quality tooling
+        run: |
+          uv venv
+          uv pip install -e ".[docs]" pytest ruff ty
+      - name: Run ruff
+        run: uv run ruff check retrain tests
+      - name: Run staged ty checks
+        run: |
+          uv run ty check \
+            retrain/type_defs.py \
+            retrain/data.py \
+            retrain/sepa.py \
+            retrain/advantages.py \
+            retrain/backend_definitions.py \
+            retrain/registry.py \
+            retrain/backends.py \
+            retrain/trainer.py \
+            retrain/prime_rl_backend.py \
+            retrain/verifiers_bridge.py \
+            --no-progress \
+            --output-format concise
+      - name: Manual blocks are synced
+        run: uv run retrain man --check
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict
+      - name: Run tests
+        run: uv run pytest -q

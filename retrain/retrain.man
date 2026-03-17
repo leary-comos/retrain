@@ -1,0 +1,1417 @@
+RETRAIN(1)
+
+NAME
+    retrain - TOML-first RLVR trainer for LLMs
+
+SYNOPSIS
+    retrain [config.toml] [--flag value ...]
+    retrain init [--template NAME] [--list] [--interactive]
+    retrain status [logdir] [--json] [--all] [--watch]
+    retrain top [logdir]
+    retrain explain [config.toml] [--json]
+    retrain migrate-config <config.toml> [--check|--write|--output PATH] [--json]
+    retrain diff <run_a> <run_b> [--json]
+    retrain diff <campaign_dir> <cond_a> <cond_b> [--json]
+    retrain trace [config.toml] [--json]
+    retrain tree [tree.toml] [--json]
+    retrain doctor
+    retrain man [--topic NAME] [--path] [--list-topics] [--sync] [--check] [--json]
+
+DESCRIPTION
+    retrain trains language models with Reinforcement Learning with
+    Verifiable Rewards (RLVR). It takes a TOML config file, loads a
+    model with a LoRA adapter, samples completions, scores them against
+    verifiable rewards, computes advantages, and updates the adapter.
+    It is designed to make experiments easier to run, compare, and
+    repeat.
+
+    The workflow is TOML-first: every hyperparameter and switch lives in
+    a config section. CLI flags override any TOML value. A single TOML
+    can describe a training run, a campaign sweep, or a LoRA-Squeeze
+    rank analysis — retrain detects which mode to use automatically.
+
+    Key design choices:
+
+        One command       retrain config.toml runs the full pipeline.
+        Experiment-first  Config -> explain -> run -> compare, with
+                          reproducible logs and condition labels.
+        Composable        Mix GRPO/MaxRL advantages with GTPO/HICRA/SEPA
+                          transforms. The 5-condition ablation from the
+                          SEPA paper is first-class.
+        Pluggable         Inference engines, reward functions, backends,
+                          and transforms are swappable via TOML or dotted
+                          Python import paths.
+        Observable        JSONL logs, wandb integration, structured
+                          emergence data, campaign status scanning.
+        Agent-friendly    This manual is a plain text file. AI agents can
+                          read it directly: retrain man --path
+
+COMMANDS
+<<AUTO:COMMANDS>>
+    retrain [config.toml]
+        Run one training job.
+        If config.toml is omitted, uses ./retrain.toml when present.
+
+    retrain campaign.toml
+        Runs campaign mode when [campaign] exists in TOML.
+        Generates conditions x seeds matrix of training runs.
+        Set parallel = true in [campaign] for concurrent execution.
+        max_workers limits concurrent subprocess count.
+
+    retrain squeeze.toml
+        Runs squeeze mode when [squeeze] exists in TOML.
+        Analyzes LoRA rank via SVD and optionally compresses.
+
+    retrain doctor
+        Checks optional dependencies for configured components.
+
+    retrain backends [--json]
+        Prints backend metadata (capabilities, deps, option schema).
+        --json            machine-readable JSON output.
+
+    retrain migrate-config <config.toml> [--check|--write|--output PATH] [--backup] [--stdin|--stdout] [--json]
+        Migrates legacy [backend] prime_rl_* keys into [backend.options].
+        Default mode previews a unified diff and does not write files.
+        --check           exits 1 when migration is required.
+        --write           writes migration in place.
+        --output PATH     writes migrated config to a new path.
+        --backup          writes <config>.bak before in-place write.
+        --stdin           reads source TOML from stdin.
+        --stdout          prints migrated TOML instead of a diff.
+        --json            machine-readable report.
+
+    retrain init [--template NAME] [--list] [--interactive]
+        Writes a starter config in the current directory.
+        Templates: default, quickstart, experiment, campaign.
+        --template NAME   selects a template (default: default).
+        --list            shows available templates.
+        --interactive/-i  guided setup with prompts.
+
+    retrain init-plugin --kind KIND --name NAME [--output-dir DIR] [--with-test]
+        Scaffolds a student-friendly plugin module.
+        Kinds: transform, advantage, algorithm, reward, planning, data,
+               backend, inference, backpressure.
+        --with-test       also generates a smoke test template.
+
+    retrain plugins [--json] [config.toml]
+        Lists built-ins + discovered plugin modules.
+        If config.toml is provided, uses its [plugins] search_paths.
+
+    retrain status [logdir] [--json] [--all] [--watch]
+        Scans log directories for run and campaign status.
+        Defaults to ./logs when no path is given.
+        Shows only active campaigns by default (last 24h).
+        --json            machine-readable JSON output.
+        --all             show all campaigns including old dead/done.
+        --active          show only active campaigns (default).
+        --watch           refresh every 5 seconds (Ctrl-C to stop).
+
+    retrain top [logdir]
+        Live dashboard: alias for status --watch --active.
+
+    retrain explain [config.toml] [--json]
+        Dry-run preview: shows what a config would do.
+        Works for single runs, campaigns, and squeeze configs.
+        --json            machine-readable JSON output.
+
+    retrain diff <run_a> <run_b> [--json]
+        Compares metrics between two training runs.
+    retrain diff <campaign_dir> <cond_a> <cond_b> [--json]
+        Compares two conditions in a campaign (averaged across seeds).
+        --json            machine-readable JSON output.
+
+    retrain trace [config.toml] [--json]
+        Pre-flight validation: build flow, trace with synthetic data.
+        Catches incompatible modes, missing data, and unsupported
+        uncertainty kinds before committing GPU time.
+        --json            machine-readable JSON output.
+
+    retrain man
+        Shows this manual.
+        --topic <name>    prints one section.
+        --path            prints the manual file path.
+        --list-topics     lists supported topic names.
+        --sync            refreshes auto-generated manual blocks.
+        --check           exits non-zero if auto blocks are stale.
+        --json            outputs JSON (full manual or single topic).
+<<END:AUTO:COMMANDS>>
+
+OPTIONS
+<<AUTO:OPTIONS>>
+    TrainConfig fields are exposed as --kebab-case CLI flags.
+    Flags override TOML values.
+
+    Common examples:
+        retrain config.toml --seed 42 --max-steps 50
+        retrain config.toml --lr 1e-4 --batch-size 16
+        retrain config.toml --advantage-mode grpo
+        retrain config.toml --advantage-param scale=2.0 --transform-param cap=0.1
+        retrain config.toml --inference-engine vllm --inference-url http://localhost:8000
+        retrain config.toml --backend prime_rl --backend-opt transport=zmq --backend-opt zmq_port=7777
+
+    All flags (sorted):
+        --adapter-path
+        --adv-clip-max
+        --advantage-mode
+        --algorithm-mode
+        --attention-kernel
+        --backend
+        --base-url
+        --batch-size
+        --bp-ema-decay
+        --bp-enabled
+        --bp-increase-margin
+        --bp-max-batch-size
+        --bp-min-batch-size
+        --bp-peak-bw-gb-s
+        --bp-peak-gflops
+        --bp-throttle-margin
+        --bp-warmup-steps
+        --clip-eps
+        --clip-eps-high
+        --data-source
+        --devices
+        --environment-args
+        --environment-auto-install
+        --environment-id
+        --environment-max-turns
+        --environment-provider
+        --group-size
+        --gtpo-beta
+        --hicra-alpha
+        --inference-dtype
+        --inference-engine
+        --inference-url
+        --kv-cache-dtype
+        --log-dir
+        --lora-alpha
+        --lora-dropout
+        --lora-rank
+        --lr
+        --max-examples
+        --max-steps
+        --max-tokens
+        --model
+        --optim-beta1
+        --optim-beta2
+        --optim-eps
+        --planning-detector
+        --planning-model
+        --planning-threshold
+        --plugins-search-paths
+        --plugins-strict
+        --prefix-caching
+        --resume-from
+        --reward-custom-function
+        --reward-custom-module
+        --reward-judge-model
+        --reward-type
+        --save-every
+        --seed
+        --sepa-correct-rate-gate
+        --sepa-delay-steps
+        --sepa-schedule
+        --sepa-steps
+        --strategic-grams
+        --surprisal-mask-rho
+        --temperature
+        --tinker-max-concurrent
+        --tinker-throttle-dir
+        --top-p
+        --trainer
+        --trainer-command
+        --transform-mode
+        --uncertainty-kind
+        --wandb-entity
+        --wandb-group
+        --wandb-project
+        --wandb-run-name
+        --wandb-tags
+        --weight-decay
+
+    Special flags:
+        --backend-opt K=V    backend-specific option override (repeatable).
+        --algorithm-param K=V algorithm plugin params (repeatable).
+        --advantage-param K=V advantage plugin params (repeatable).
+        --transform-param K=V transform plugin params (repeatable).
+        --resume VALUE    alias for --resume-from VALUE
+
+    Unknown flags produce an error with close-match suggestions.
+<<END:AUTO:OPTIONS>>
+
+QUICKSTART
+<<AUTO:QUICKSTART>>
+    cp retrain.toml my_run.toml
+    retrain my_run.toml
+    retrain my_run.toml --seed 42 --max-steps 50
+<<END:AUTO:QUICKSTART>>
+
+    Step-by-step first run:
+
+    1. Generate a starter config:
+
+        retrain init --template quickstart
+
+      Or use the interactive wizard:
+
+        retrain init --interactive
+
+    2. Run 20 steps to verify the setup:
+
+        retrain
+
+    3. Inspect the results:
+
+        retrain status
+
+    4. Try a full experiment:
+
+        retrain init --template experiment
+        retrain --max-steps 100
+
+    If you run bare retrain with no config file in a terminal, it
+    offers to create one for you automatically.
+
+CONFIGURATION
+    All fields are set in TOML sections. Defaults shown below.
+
+  [algorithm]
+
+    advantage_mode = "maxrl"
+        Built-ins: "grpo" or "maxrl", or a dotted plugin path
+        (e.g. "my_module.my_advantage"). Hard error if invalid.
+
+        grpo    Group Relative Policy Optimization. Centers rewards
+                around the group mean: A_i = r_i - mean(r).
+
+        maxrl   Inverse success-rate reweighting. Normalizes by group
+                mean reward: A_i = (r_i - mean(r)) / (mean(r) + eps).
+                Amplifies signal from rare correct completions.
+
+    transform_mode = "gtpo_sepa"
+        Token-level advantage transform applied after episode-level
+        advantages. Built-in modes:
+
+        none            No transform. Episode advantages broadcast to
+                        all tokens uniformly.
+        gtpo            Entropy-weighted credit assignment. High-entropy
+                        tokens get more credit. Currently uses surprisal
+                        as proxy; see uncertainty_kind. Controlled by
+                        gtpo_beta.
+        gtpo_hicra      GTPO + HICRA planning token amplification.
+        gtpo_sepa       GTPO + SEPA selective entropy pooling (default).
+        gtpo_sepa_amp   GTPO + SEPA with amplification variant.
+        gtpo_sepa_amp_c GTPO + SEPA amplification with clamping.
+        entropy_mask    Yue et al. entropy masking. Zeros out advantages
+                        on low-entropy tokens, keeping only the top-rho
+                        fraction by entropy rank. Controlled by
+                        surprisal_mask_rho (legacy: entropy_mask_rho).
+                        Uses GTPO weighting.
+
+        Or a dotted plugin path (e.g. "my_module.make_spec").
+        See PLUGINS for the full plugin authoring guide.
+
+    uncertainty_kind = "surprisal"
+        Token uncertainty signal for GTPO-family transforms.
+        "surprisal" uses sampled-token -logprob (requires only logprobs).
+        "predictive_variance" uses p*(1-p) where p=exp(logprob) — free
+        from existing logprobs, peaks at genuine uncertainty.
+        "shannon_entropy" uses true per-position entropy H(t) = -sum(p*log(p))
+        computed on GPU from the full vocabulary distribution. Requires
+        inference_engine = "pytorch" and backend = "local".
+        Or a dotted plugin path (e.g. "my_module.my_uncertainty").
+
+    surprisal_mask_rho = 0.0
+        Float in [0.0, 1.0]. Fraction of tokens to keep by surprisal
+        rank when transform_mode = "entropy_mask". Tokens in the
+        top-rho fraction (highest surprisal) keep their advantages;
+        the rest are zeroed. 0.0 masks all tokens (no training
+        signal); 1.0 keeps all tokens (no masking). Typical
+        values: 0.1-0.5. TOML key entropy_mask_rho accepted as alias.
+
+  [backend]
+
+    backend = "local"
+        "local", "tinker", or "prime_rl". Supports dotted-path plugins.
+        See PLUGINS for custom backend authoring.
+        "local" requires torch (pip install retrain[local]).
+        "tinker" requires Tinker SDK (pip install retrain[tinker]).
+        "prime_rl" requires PRIME-RL (pip install prime-rl).
+
+    devices = "gpu:0"
+        Comma-separated device specs: "gpu:0", "gpu:0,gpu:1", "cpu".
+        gpu:N maps to cuda:N. Multiple CUDA devices enable split mode
+        (first for inference, last for training).
+
+    adapter_path = "/tmp/retrain_adapter"
+        Filesystem path for LoRA adapter checkpoints.
+        Warning if starts with /tmp (checkpoints may be lost).
+
+    throttle_dir = ""
+        Path to a shared lock directory for cross-process Tinker API
+        throttling. When non-empty, a file-based counting semaphore
+        limits how many processes call the Tinker API concurrently.
+        Auto-set by campaign mode for parallel tinker runs; leave
+        empty for standalone runs (zero overhead).
+
+    max_concurrent = 4
+        Maximum simultaneous Tinker API calls when throttle_dir is
+        set. Only relevant for the tinker backend during parallel
+        campaigns. Increase if your Tinker endpoint has been scaled
+        up; decrease if you still see intermittent timeouts.
+
+  [backend.options]
+
+    Backend-specific key/value options table.
+    For backend = "prime_rl":
+        transport = "filesystem"   # or "zmq"
+        zmq_host = "localhost"
+        zmq_port = 5555
+        zmq_hwm = 10
+        strict_advantages = true   # must remain true; false is rejected
+        sync_wait_s = 30
+        sync_poll_s = 0.2
+
+    Legacy migration:
+        Legacy prime_rl_* keys under [backend] hard-fail at load time.
+        Use migrate-config to rewrite safely:
+            retrain migrate-config retrain.toml
+            retrain migrate-config retrain.toml --check
+            retrain migrate-config retrain.toml --write
+
+    Capability metadata (doctor/explain/trainer diagnostics):
+        reports_sync_loss
+            Whether train_step() returns a real synchronous optimization loss.
+        preserves_token_advantages
+            Whether token-level advantages are consumed without aggregation.
+        supports_checkpoint_resume
+            Whether checkpoint restore is exposed at interface level.
+        resume_runtime_dependent
+            Whether resume success depends on external runtime/SDK behavior.
+
+  [model]
+
+    model = "Qwen/Qwen3-4B-Instruct-2507"
+        Any HuggingFace model ID.
+
+    base_url = ""
+        Backward-compatible fallback for inference URL when
+        [inference].url is not set.
+
+    lora_rank = 32
+        Must be > 0. Also used as fallback source_rank for [squeeze].
+
+  [training]
+
+    seed = -1
+        -1 = no seed (random). >= 0 sets deterministic seed.
+
+    max_steps = 500
+        Must be > 0.
+
+    batch_size = 8
+        Must be > 0. Number of prompts per training step.
+
+    group_size = 16
+        Must be > 0. Completions sampled per prompt.
+
+    max_tokens = 10240
+        Must be > 0. Maximum new tokens per completion.
+        The quickstart template intentionally uses 1024 for low-cost
+        smoke tests. Treat 10240 as the standard training default.
+
+    temperature = 0.7
+        Must be >= 0. Warning if > 2.0.
+
+    top_p = 0.95
+        Must be in (0, 1].
+
+    lr = 4e-5
+        Must be > 0. Learning rate.
+
+    weight_decay = 0.0
+        Warning if negative.
+
+    max_examples = 0
+        0 = no limit. Positive integer caps dataset size.
+
+    save_every = 20
+        Warning if 0 (disables periodic checkpoints).
+
+    trainer = "retrain"
+        Training runner. Built-in: "retrain", "command".
+        Dotted paths load plugins: "my_module.my_runner".
+        "retrain" uses the built-in training loop.
+        "command" runs an arbitrary shell command (see trainer_command).
+
+    trainer_command = ""
+        Shell command template when trainer = "command".
+        Placeholders: {config_path}, {log_dir}, {adapter_path}, {model}.
+        The command receives a JSON config file at {config_path} and
+        should write metrics to {log_dir}/metrics.jsonl and save the
+        adapter to {adapter_path}.
+
+  [optimizer]
+
+    beta1 = 0.9
+        Adam beta1.
+
+    beta2 = 0.95
+        Adam beta2.
+
+    eps = 1e-8
+        Adam epsilon.
+
+  [lora]
+
+    alpha = 0
+        0 = auto (rank * 2). LoRA scaling factor.
+
+    dropout = 0.0
+        LoRA dropout probability.
+
+  [gtpo]
+
+    beta = 0.1
+        Entropy-weighted credit assignment strength.
+        0.0 disables entropy weighting (uniform advantages).
+
+  [hicra]
+
+    alpha = 0.2
+        Planning token amplification factor.
+        A_HICRA(t) = A(t) + alpha * |A(t)| * mask(t).
+        0.0 disables HICRA. Used with transform_mode = "gtpo_hicra".
+
+  [sepa]
+
+    steps = 500
+        Total steps for lambda ramp from 0 to 1. Must be >= 0.
+
+    schedule = "linear"
+        "linear" or "auto". Auto adapts based on execution-token
+        entropy variance decay with linear as fallback floor.
+
+    delay_steps = 50
+        Steps to delay before beginning the SEPA ramp. Must be >= 0.
+
+    correct_rate_gate = 0.1
+        SEPA stays disabled until model achieves this correct rate.
+        Must be in [0, 1]. 0.0 disables the gate. Sticky-open once met.
+
+  [inference]
+
+    engine = "pytorch"
+        "pytorch", "max", "vllm", "sglang", "mlx", "openai".
+        Supports dotted-path plugins. See PLUGINS.
+
+    url = ""
+        Server URL. Defaults per engine when empty:
+        vllm -> http://localhost:8000
+        sglang -> http://localhost:30000
+        mlx -> http://localhost:8080
+        openai -> http://localhost:8000
+        pytorch -> not used (local inference).
+        max -> empty = in-process; set URL for max serve.
+
+    attention_kernel = "default"
+        Attention kernel selection.
+
+    dtype = "auto"
+        Model dtype for inference.
+
+    kv_cache_dtype = "auto"
+        KV cache dtype.
+
+    prefix_caching = true
+        Enable/disable prefix caching.
+
+  [backpressure]
+
+    enabled = false
+        Enable USL+Roofline adaptive batch sizing.
+
+    warmup_steps = 10
+        Steps before controller starts. Must be >= 0.
+
+    ema_decay = 0.9
+        EMA smoothing for throughput. Must be in [0, 1].
+
+    throttle_margin = 0.85
+        Safe operating point fraction. Must be in (0, 1].
+
+    increase_margin = 0.5
+        Hysteresis gap for increase trigger. Must be in (0, 1].
+
+    min_batch_size = 1
+        Must be >= 1.
+
+    max_batch_size = 64
+        Must be >= min_batch_size.
+
+    peak_gflops = 0.0
+        Hardware peak GFLOPS. 0.0 disables roofline hints.
+
+    peak_bw_gb_s = 0.0
+        Hardware peak memory bandwidth (GB/s). 0.0 disables roofline.
+
+  [planning]
+
+    detector = "regex"
+        "regex" or "semantic". Supports dotted-path plugins.
+        See PLUGINS.
+        "semantic" requires sentence-transformers
+        (pip install retrain[semantic]).
+
+    model = "all-MiniLM-L6-v2"
+        Sentence-transformer model for "semantic" detector.
+
+    threshold = 0.02
+        For "semantic": plan_sim > exec_sim + threshold AND
+        plan_sim > 0.25 to classify as planning.
+
+  [data]
+
+    source = "math"
+        "math" loads EleutherAI/hendrycks_math.
+        Supports dotted-path plugins. See PLUGINS.
+
+  [environment]
+
+    provider = ""
+        "" (disabled) or "verifiers". Hard error if invalid.
+
+    id = ""
+        Required when provider is set. Hub environment ID.
+        Examples: "primeintellect/gsm8k", "primeintellect/wordle".
+
+    args = ""
+        JSON object or TOML inline table: args = { split = "train" }.
+        Must be valid JSON decoding to a dict when provider is set.
+
+    max_turns = -1
+        -1 = no limit. Positive integer caps multi-turn rollouts.
+
+    auto_install = false
+        Auto-download Hub environments via verifiers SDK.
+
+  [reward]
+
+    type = "match"
+        "match": boxed string-match.
+        "math": symbolic equivalence (pip install retrain[verifiers]).
+        "judge": LLM-based (pip install retrain[verifiers]).
+        "custom": user-provided module.
+
+    judge_model = ""
+        Model for judge reward. Defaults to "gpt-4o-mini" if empty.
+
+    custom_module = ""
+        Python module path. Required when type = "custom".
+
+    custom_function = "score"
+        Function name in custom_module.
+        Signature: (response: str, reference: str) -> float.
+
+  [resume]
+
+    from = ""
+        Checkpoint name to resume from. Empty = no resume.
+        CLI alias: --resume.
+
+  [logging]
+
+    log_dir = "logs/train"
+        Directory for JSONL training logs.
+
+    wandb_project = ""
+        W&B project. Empty disables wandb.
+
+    wandb_run_name = ""
+        W&B run name.
+
+    wandb_entity = ""
+        W&B entity (team/user).
+
+    wandb_group = ""
+        W&B group (used by campaign for condition grouping).
+
+    wandb_tags = ""
+        W&B tags (comma-separated).
+
+    strategic_grams = ""
+        JSON array or comma-separated planning phrases for the regex
+        detector. Empty = 18 built-in phrases.
+
+CAMPAIGN MODE
+    A TOML with a [campaign] section runs campaign mode:
+    conditions x seeds matrix of training runs.
+
+    Example:
+
+        [campaign]
+        seeds = [42, 101, 202, 303, 404, 505, 606, 707]
+        max_steps = 500
+
+        [[campaign.conditions]]
+        advantage_mode = "grpo"
+        transform_mode = "none"
+
+        [[campaign.conditions]]
+        advantage_mode = "maxrl"
+        transform_mode = "gtpo_sepa"
+
+    Fields:
+        seeds           List of ints.
+                        Default: [42, 101, 202, 303, 404, 505, 606, 707].
+        max_steps       Override for all runs. Default: 500.
+        conditions      Array of tables with advantage_mode + transform_mode.
+        parallel        Boolean. When true, runs execute as concurrent
+                        subprocesses instead of sequentially.
+        max_workers     Integer. Maximum concurrent subprocesses when
+                        parallel = true. 0 (default) = all runs at once.
+        stagger_seconds Float. Delay between launching consecutive
+                        subprocesses to desynchronize API calls.
+                        Default: 0.0 (no delay).
+
+    Default conditions (when omitted):
+        ("grpo", "none"), ("maxrl", "none"), ("maxrl", "gtpo"),
+        ("maxrl", "gtpo_hicra"), ("maxrl", "gtpo_sepa").
+
+    These form a progressive ablation — each adds one component to
+    isolate its contribution to reasoning performance:
+
+        1. grpo+none          Baseline GRPO, no transforms
+        2. maxrl+none         Add inverse success-rate reweighting
+        3. maxrl+gtpo         Add entropy-weighted credit assignment
+        4. maxrl+gtpo_hicra   Add planning token amplification
+        5. maxrl+gtpo_sepa    Add selective entropy pooling (full)
+
+    If the TOML also has [squeeze], auto-squeeze runs after the first
+    completed training run.
+
+    Output structure:
+
+        logs/campaign_20260222_010127/
+        +-- manifest.json
+        +-- runs/
+            +-- grpo+none_s42/
+            |   +-- metrics.jsonl
+            |   +-- emergence/
+            +-- grpo+none_s101/
+            +-- maxrl+gtpo_sepa_s42/
+            +-- ...
+
+    manifest.json contains the full campaign configuration: timestamp,
+    conditions, seeds, max steps, and run details. When auto-squeeze is
+    enabled, also includes the recommended rank.
+
+    wandb integration: each run gets name {condition}_s{seed}, group
+    {condition}, and tags {condition},seed{seed}.
+
+  Parallel execution
+
+    By default campaigns run sequentially. Set parallel = true for
+    concurrent execution via subprocesses:
+
+        [campaign]
+        parallel = true
+        max_workers = 4
+
+    Each subprocess runs `python -m retrain.cli <config>`. Per-run
+    stdout/stderr are captured to {run_dir}/stdout.log and stderr.log.
+    Ctrl-C gracefully terminates all active processes. When max_workers
+    is 0 or omitted, all runs launch at once.
+
+    For the tinker backend, parallel campaigns automatically create a
+    shared lock directory (tinker_throttle/ inside the campaign output)
+    and set throttle_dir on every per-run config. This limits concurrent
+    Tinker API calls to max_concurrent (default 4), preventing the
+    502/504 errors that previously occurred when many workers hit the
+    endpoint simultaneously. You can safely set max_workers higher than
+    max_concurrent — workers queue for API access instead of flooding
+    the backend.
+
+        [campaign]
+        parallel = true
+        max_workers = 12
+
+        [backend]
+        backend = "tinker"
+        max_concurrent = 4    # only 4 of 12 workers call Tinker at once
+
+    Standalone runs (no campaign) skip throttling entirely — zero overhead.
+
+  Status matrix
+
+    `retrain status` displays a condition x seed matrix for campaigns:
+
+                       condition      s42     s101     s202     s303
+        ----------------------------------------------------------
+                       grpo+none   42/100  100 ✓    61/100       —
+                  maxrl+gtpo_sepa  100 ✓   100 ✓    74/100   13 ✗
+
+    Cell values show step progress:
+        42/100    active run at step 42 of 100
+        100 ✓     completed run
+        13 ✗      stale/dead run (no progress for 5+ minutes, process gone)
+        —         run not started or no metrics yet
+
+    When a campaign's runner process is alive, stale runs show step/max
+    instead of the ✗ marker (the step may just be slow).
+
+    A one-line summary banner appears above the matrix:
+
+        Campaigns: 1 running, 1 done  |  Runs: 2 active, 1 done, 1 pending
+
+SQUEEZE MODE
+    A TOML with [squeeze] (and no [campaign]) runs LoRA rank analysis.
+    Based on LoRA-Squeeze (arXiv 2602.10993): train at high rank, then
+    find the smallest rank that retains the information.
+
+    Algorithm:
+        1. Load LoRA adapter (lora_A and lora_B per layer)
+        2. QR decompositions of A and B (avoids full m x n product)
+        3. SVD on the small r x r core matrix
+        4. Cumulative variance: V(k) = sum(s^2[:k]) / sum(s^2)
+        5. Recommend smallest rank where mean variance >= threshold
+
+    Example config:
+
+        [squeeze]
+        adapter_path = "adapters/my_run"
+        target_ranks = [4, 8, 16]
+        min_variance_retention = 0.95
+
+    Fields:
+        adapter_path            Required. Path to PEFT adapter.
+                                Supports tinker:// URIs.
+        source_rank = 0         0 = fallback to [model].lora_rank.
+        target_ranks = []       [] = auto power-of-2 sequence.
+        min_variance_retention = 0.95
+                                Threshold for recommended rank.
+        output_path = ""        Non-empty: compress and save.
+        compress_to = 0         0 = use recommended rank.
+        device = "cpu"          Torch device for SVD.
+
+    Example output:
+
+        Source rank: 128
+        Layers analyzed: 196
+
+          Rank  Mean Var%  Min Var%  Max Var%
+        -------------------------------------------
+             1     12.47%     5.23%    22.81%
+             4     42.31%    28.67%    61.05%
+            16     85.72%    74.30%    93.18%
+            32     95.48%    91.22%    98.15% <--
+            64     99.12%    97.84%    99.73%
+           128    100.00%   100.00%   100.00%
+
+        Recommended rank: 32 (>= 95% variance retained)
+
+TREE MODE
+    The experiment tech tree organises campaigns into a dependency graph.
+    Each node wraps a campaign TOML and has a success condition.  When a
+    node completes, its outcome (success/failure) unlocks the next set
+    of experiments automatically.
+
+    Example TOML:
+
+        [tree]
+        name = "post-sepa"
+        description = "Experiments after the SEPA null result"
+
+        [[tree.nodes]]
+        id = "ratio-clip"
+        label = "PPO ratio clipping"
+        campaign = "campaigns/ratio-clip.toml"
+        notes = "Highest priority. clip_eps=0.2 on local GPU."
+        refs = ["PPO: https://arxiv.org/abs/1707.06347"]
+        success = "correct_rate > 0.55"
+        on_success = ["shannon-gtpo", "clip-sweep"]
+        on_failure = ["kl-penalty"]
+
+    Node fields:
+
+        id              Required. Unique short identifier.
+        label           Human-readable description (defaults to id).
+        campaign        Required. Path to campaign TOML.
+        notes           Free-text notes (shown in tree and show output).
+        refs            List of reference strings (papers, URLs).
+        success         Condition string: "metric op value".
+                        Valid metrics: correct_rate, loss, mean_reward.
+                        Valid ops: >, >=, <, <=, ==.
+        on_success      Node ids to unlock when this node succeeds.
+        on_failure      Node ids to unlock when this node fails.
+        related         Node ids for informational cross-references.
+
+    Subcommands:
+
+        retrain tree [tree.toml] [--json]
+            View the full tree as ASCII art. With --json, output the
+            tree as a JSON object with computed statuses.
+
+        retrain tree next [tree.toml]
+            List nodes that are ready to run (pending, not locked).
+
+        retrain tree show <node> [tree.toml] [--json]
+            Show detailed information for a single node.
+
+        retrain tree run <node> [tree.toml]
+            Launch the node's campaign. Sets status to running, then
+            done on completion. Run eval afterwards.
+
+        retrain tree note <node> "text" [tree.toml]
+            Add a timestamped annotation (lab notebook entry).
+
+        retrain tree eval [tree.toml]
+            Evaluate success conditions for all completed nodes that
+            do not yet have an outcome.
+
+        retrain tree reset <node> [tree.toml]
+            Reset a node to pending. Clears outcome, campaign_dir,
+            result, and timestamps. Preserves annotations.
+
+    State file:
+
+        Tree state is stored in tree_state.json beside the tree TOML
+        (e.g. campaigns/tree_state.json for campaigns/tree.toml).
+        Writes are atomic (tmp + rename).  The state file tracks per-
+        node status, outcome, campaign_dir, results, timestamps, and
+        annotations.  It is safe to delete the state file to start
+        fresh — all nodes revert to pending.
+
+    Status icons:
+
+        [ ]   pending    Ready to run (root or parent outcome matches).
+        [#]   locked     Waiting for a parent to complete.
+        [~]   running    Campaign in progress.
+        [✓]   done       Succeeded (outcome = success).
+        [✗]   done       Failed (outcome = failure).
+        [-]   skipped    Parent completed on wrong branch.
+
+    Node lifecycle:
+
+        pending → running → done (success|failure)
+                         ↘ locked children become pending or skipped
+
+    Success condition format:
+
+        "metric op threshold"
+
+        metric      One of: correct_rate, loss, mean_reward.
+        op          One of: > >= < <= ==
+        threshold   A floating-point number.
+
+        When evaluated, the metric is averaged across all completed
+        campaign runs, then compared against the threshold.
+
+INFERENCE ENGINES
+    Engine      Type     Default URL                  Notes
+    -------     ------   -------------------------    ----------------------------
+    pytorch     local    (none, local inference)       Default. Works on CPU/GPU/Mac.
+    max         hybrid   (empty = in-process)          Set url for max serve (multi-GPU).
+    vllm        server   http://localhost:8000         Supports /v1/load_lora_adapter.
+    sglang      server   http://localhost:30000        Supports /v1/load_lora_adapter.
+    mlx         server   http://localhost:8080         Apple Silicon. Adapter via request.
+    openai      server   http://localhost:8000         Any OpenAI-compatible endpoint.
+
+    All engines support dotted-path plugins for custom implementations.
+
+DIFF MODE
+    The diff command compares two training runs or two campaign
+    conditions side-by-side.
+
+    Compare two runs:
+
+        retrain diff logs/run_a logs/run_b
+
+    Compare two campaign conditions (averaged across seeds):
+
+        retrain diff logs/campaign_dir grpo+none maxrl+gtpo_sepa
+
+    Machine-readable output:
+
+        retrain diff --json logs/run_a logs/run_b
+
+    The comparison table shows final metrics (loss, correct_rate,
+    mean_reward), wall time, step counts, a winner indicator for each
+    metric, and ASCII sparkline curves of correct_rate over training.
+
+    Winner indicators:
+        <       A is better (lower loss, or higher correct_rate/reward)
+        >       B is better
+        =       Equal (within floating point tolerance)
+
+LOGGING
+    retrain writes structured JSONL logs to log_dir:
+
+        logs/train/
+        +-- metrics.jsonl
+        +-- emergence/
+            +-- steps.jsonl
+            +-- generations.jsonl
+
+    metrics.jsonl fields (one JSON object per training step):
+
+        step                    Training step index
+        condition               Label like "maxrl+gtpo_sepa"
+        loss                    Training loss
+        reported_loss           Raw backend-reported loss value
+        loss_is_placeholder     True when loss is backend placeholder
+        backend_reports_sync_loss
+                                Whether backend loss is synchronous
+        backend_preserves_token_advantages
+                                Whether backend keeps token-level advantages
+        mean_reward             Mean reward across the batch
+        correct_rate            Batch correct rate (0.0 - 1.0)
+        running_correct_rate    Cumulative correct rate
+        sepa_lambda             Current SEPA pooling strength
+        sepa_gate_open          Whether SEPA correctness gate is open
+        num_datums              Datums submitted for training
+        max_token_hit_rate      Fraction hitting max_tokens limit
+        step_time_s             Wall time for the step (seconds)
+        batch_size              Current batch size
+        group_size              Current group size
+        bp_action               Back pressure action
+        bp_regime               Back pressure regime
+        uncertainty_kind        Uncertainty variant (surprisal, etc.)
+        exec_surprisal_mean     Mean execution-token surprisal (GTPO)
+        exec_surprisal_var      Execution-token surprisal variance
+        plan_surprisal_mean     Mean planning-token surprisal
+        plan_surprisal_var      Planning-token surprisal variance
+        exec_entropy_mean       Alias for exec_surprisal_mean (backward compat)
+        exec_entropy_var        Alias for exec_surprisal_var
+        plan_entropy_mean       Alias for plan_surprisal_mean
+        plan_entropy_var        Alias for plan_surprisal_var
+
+    emergence/steps.jsonl: compact per-step summaries for emergence
+    analysis (step, mean_reward, correct_count, total_count, condition).
+
+    emergence/generations.jsonl: individual completions with prompt,
+    completion text, reward, and token count.
+
+    wandb metric prefixes:
+        train/                  loss, reported_loss, loss_is_placeholder,
+                                rewards/*, sepa_*, step_time_s, ...
+        train/backend/          reports_sync_loss, preserves_token_advantages
+        train/surprisal/        exec_mean, exec_var, plan_mean, plan_var
+        train/entropy/          backward-compat aliases for train/surprisal/
+        train/backpressure/     action, regime, p_star, sigma, ...
+
+ADVANTAGE PIPELINE
+    retrain uses a composable advantage pipeline:
+
+        Rewards (per completion)
+            |
+            v
+        Episode-level advantage (GRPO or MaxRL)
+            |
+            v
+        Token-level expansion (GTPO entropy weighting)
+            |
+            v
+        Optional transform (HICRA or SEPA)
+            |
+            v
+        Token-level advantages (fed to training loss)
+
+    GRPO
+        Group Relative Policy Optimization.
+        A_i = r_i - mean(r)
+        Simple centering. Positive rewards get positive advantage.
+
+    MaxRL
+        Inverse success-rate reweighting.
+        A_i = (r_i - mean(r)) / (mean(r) + eps)
+        Amplifies signal from rare correct completions when the model
+        is mostly wrong. Dampens signal on easy problems.
+
+    GTPO
+        Entropy-weighted token-level credit assignment.
+        High-entropy tokens receive more credit. Currently uses
+        surprisal as entropy proxy; see uncertainty_kind.
+        Controlled by gtpo_beta (0.0 disables, 0.1 default).
+
+    HICRA
+        Planning token amplification.
+        A_HICRA(t) = A(t) + alpha * |A(t)| * mask(t)
+        Boosts advantage on tokens detected as "planning" via regex
+        or semantic similarity.
+
+    SEPA
+        Selective Entropy Pooling of Attention.
+        Pools execution-token uncertainty values toward their mean,
+        reducing variance on execution tokens while preserving diverse
+        planning behavior. Currently operates on surprisal (the only
+        available signal); will use full entropy when backends provide
+        token distributions. Lambda ramps 0->1 over training, gated
+        by a correct_rate threshold.
+
+  Post-Process Hooks
+
+    After GTPO weighting and optional HICRA/SEPA transforms, a
+    TransformSpec may define a post_process hook for final adjustments.
+    The built-in entropy_mask transform uses this mechanism.
+
+    Signature (PostProcessFn):
+
+        (all_token_advs, all_raw_entropies, params) -> (modified_advs, extra_metrics)
+
+    Arguments:
+        all_token_advs      list[list[float]]   Token advantages per sequence.
+        all_raw_entropies   list[list[float]]   Original entropies (pre-transform).
+        params              dict[str, Any]      From TrainConfig.post_process_params.
+
+    Returns:
+        modified_advs       list[list[float]]   Same shape as input (validated).
+        extra_metrics       dict[str, float]    Auto-logged to JSONL and wandb.
+
+    Shape validation: the hook must return the same number of sequences
+    and tokens per sequence. A ValueError is raised on mismatch.
+
+    The entropy_mask hook returns two extra metrics:
+        entropy_mask_threshold    Entropy cutoff value used
+        entropy_mask_fraction     Fraction of tokens that were zeroed
+
+VALIDATION
+    Hard errors (batched, raised at config load):
+
+        batch_size <= 0         "batch_size must be > 0"
+        group_size <= 0         "group_size must be > 0"
+        max_steps <= 0          "max_steps must be > 0"
+        max_tokens <= 0         "max_tokens must be > 0"
+        lora_rank <= 0          "lora_rank must be > 0"
+        lr <= 0                 "lr must be > 0"
+        temperature < 0         "temperature must be >= 0"
+        top_p not in (0,1]      "top_p must be in (0, 1]"
+        bad advantage_mode      "Invalid advantage_mode"
+        bad transform_mode      "Invalid transform_mode"
+        bad uncertainty_kind     "Unknown uncertainty kind"
+        bad env provider        "Invalid environment_provider"
+        env id missing          "environment_id is required when provider is set"
+        bad env args JSON       "environment_args must be valid JSON"
+        strict_advantages=false "disallowed for prime_rl"
+
+    Warnings (non-fatal):
+
+        adapter_path /tmp       "checkpoints may be lost on reboot"
+        temperature > 2.0       "unusually high"
+        save_every == 0         "disables periodic checkpoints"
+        weight_decay < 0        "negative -- this is unusual"
+
+ENVIRONMENT
+<<AUTO:ENVIRONMENT>>
+    retrain uses verifiers environments for RLVR training data.
+    Set [environment].provider = "verifiers" and specify a Hub ID.
+
+    Trainable verifiers examples:
+        primeintellect/gsm8k
+        primeintellect/wordle
+        primeintellect/hendrycks-math
+
+    Caveat:
+        Some hub environments are eval-only and do not expose training
+        datasets. In that case retrain fails fast with actionable guidance.
+<<END:AUTO:ENVIRONMENT>>
+
+EXAMPLES
+    Smoke test (20 steps, minimal resources):
+
+        retrain init --template quickstart
+        retrain
+
+    Reproducible experiment with seed and wandb:
+
+        retrain init --template experiment
+        retrain --wandb-project my-experiment
+
+    Override hyperparameters from the command line:
+
+        retrain config.toml --seed 42 --lr 1e-4 --max-steps 200
+
+    Campaign sweep (2 conditions x 4 seeds):
+
+        retrain init --template campaign
+        retrain campaign.toml
+
+    Compare two completed runs:
+
+        retrain diff logs/train logs/experiment
+
+    Compare campaign conditions:
+
+        retrain diff logs/campaign_20260222 grpo+none maxrl+gtpo_sepa
+
+    Check run status (active campaigns only):
+
+        retrain status logs
+
+    Show all campaigns including old dead/done ones:
+
+        retrain status logs --all
+
+    Live dashboard (refreshes every 5s):
+
+        retrain top logs
+
+    Preview what a config would do without running:
+
+        retrain explain config.toml
+
+    Use a vLLM inference server:
+
+        retrain config.toml --inference-engine vllm \
+            --inference-url http://localhost:8000
+
+    Interactive config setup:
+
+        retrain init --interactive
+
+    Resume from a checkpoint:
+
+        retrain config.toml --resume-from step_100
+
+METRICS GUIDE
+    Primary metrics (compare across conditions):
+
+        correct_rate            Batch accuracy. The main outcome metric.
+        running_correct_rate    Cumulative accuracy (smoother).
+        mean_reward             Average reward (0-1 scale).
+
+    Secondary metrics (understand mechanism):
+
+        exec_surprisal_var      SEPA should reduce this (pooling effect).
+        plan_surprisal_var      Should stay high (diverse thinking).
+        exec_surprisal_mean     Should decrease (model gets confident).
+        plan_surprisal_mean     Should stay high (model keeps thinking).
+        sepa_lambda             Ramps 0->1 over training.
+        sepa_gate_open          When the correctness gate opened.
+
+    Diagnostic metrics (debug, not for comparison):
+
+        max_token_hit_rate      Spikes = model rambling. Increase max_tokens.
+        loss                    Should decrease. Can be negative (normal).
+        loss_is_placeholder     True for async backend-reported placeholder loss.
+        num_datums              Drops = groups uninformative (all right/wrong).
+        bp_regime               Stuck in "retrograde" = batch size too high.
+
+CAPACITY PLANNING
+    Capacity planning in retrain is about sizing actual trainer runs,
+    not generic infrastructure. Use these
+    formulas before launching long runs:
+
+        concurrency = batch_size * group_size
+        total_campaign_steps = num_conditions * num_seeds * max_steps
+        estimated_wall_time = total_campaign_steps * median_step_time / effective_parallelism
+
+    Definitions:
+        median_step_time        Use median step_time_s from pilot runs.
+        effective_parallelism   min(max_workers, total_runs) when
+                                campaign.parallel = true; otherwise 1.
+
+    Profiles:
+        Standard (default)      batch_size=8, group_size=16, max_tokens=10240
+        Smoke test (quickstart) batch_size=2, group_size=8, max_tokens=1024
+
+    Calibration loop:
+        1) Run 20-50 pilot steps.
+        2) Measure median step_time_s.
+        3) Check max_token_hit_rate:
+           high -> truncation likely; increase max_tokens only if needed.
+           low  -> consider lowering max_tokens for cheaper runs.
+        4) Check backpressure metrics (bp_action, bp_regime, bp_p_star):
+           frequent throttle/retrograde means concurrency is too high.
+        5) Recompute estimated wall time and adjust max_workers.
+
+    Campaign worker knobs:
+        parallel        Enable concurrent subprocesses.
+        max_workers     Concurrency cap (0 = launch all runs).
+        stagger_seconds Launch delay between workers (helps with API bursts).
+
+    Suggested retrain flow:
+        retrain explain campaign.toml
+        retrain campaign.toml
+        retrain status logs
+
+TROUBLESHOOTING
+    1) Run "retrain doctor" for dependency problems.
+    2) If env auto-install fails, verify environment ID and permissions.
+    3) If "no informative datums" appears, rewards may be uniform in
+       sampled groups — reduce batch_size or increase group_size.
+    4) "max_token_hit_rate" spiking: the model is running out of
+       completion space. Increase max_tokens.
+    5) Loss is negative: this is normal with importance-sampling loss.
+    6) Training is slow: reduce batch_size and group_size, or switch
+       to a server-based inference engine (vllm, sglang).
+    7) CUDA out of memory: reduce batch_size, group_size, or
+       max_tokens. Use --devices gpu:0,gpu:1 for split mode.
+    8) "Unknown flag" error: retrain suggests close matches.
+       Run "retrain man --topic options" for the full flag list.
+    9) To check if auto-generated manual blocks are stale:
+       retrain man --check
+       To refresh them: retrain man --sync
+
+EXIT STATUS
+    0   Success.
+    1   Error (invalid config, missing deps, training failure).
+
+FILES
+    retrain.toml                 Default config in current working directory
+    campaign.toml                Default campaign config filename
+    logs/                        Default log directory
+        metrics.jsonl            Per-step training metrics
+        emergence/               Emergence analysis data
+        manifest.json            Campaign metadata (in campaign dirs)
+    retrain/retrain.man          This manual source file
+    docs/configuration.md        Full TOML reference
+    docs/capacity-planning.md    Capacity formulas and planning workflow
+    docs/getting-started.md      Installation and first-run guide
+    docs/campaigns.md            Campaign sweep documentation
+    docs/squeeze.md              LoRA-Squeeze documentation
+    docs/advantages.md           Advantage function details
+    docs/logging.md              Logging and wandb integration
+
+ARCHITECTURE
+    retrain/
+    +-- cli.py                   Entry point, TOML + CLI override parsing
+    +-- config.py                TrainConfig dataclass, TOML loader
+    +-- trainer.py               Main training loop
+    +-- advantages.py            GRPO, MaxRL, GTPO, HICRA, SEPA
+    +-- flow.py                  Pre-flight: flow construction and synthetic trace
+    +-- sepa.py                  SEPA scheduler (linear / auto)
+    +-- rewards.py               match, math, judge, custom rewards
+    +-- backpressure.py          USL+Roofline adaptive batch sizing
+    +-- campaign.py              Sweep orchestrator (conditions x seeds)
+    +-- squeeze.py               LoRA-Squeeze rank analysis
+    +-- diff.py                  Run comparison and sparkline rendering
+    +-- status.py                Log scanning and status reporting
+    +-- local_train_helper.py    Local GPU backend (PyTorch/PEFT)
+    +-- tinker_backend.py        Remote GPU backend (Tinker API)
+    +-- data.py                  MATH dataset loader
+    +-- logging_utils.py         JSONL logger
+
+PLUGINS
+    retrain supports seven plugin types. Each is specified as a dotted
+    Python import path in TOML (e.g. "my_package.my_module.factory").
+
+  1. Advantage plugin
+
+    Set advantage_mode to a dotted path. The target can be:
+
+        def my_advantage(rewards: list[float]) -> list[float]:
+            ...
+
+    Optional params:
+
+        def my_advantage(rewards: list[float], params: dict) -> list[float]:
+            ...
+
+  2. Transform plugin
+
+    Set transform_mode to a dotted path. The function must return a
+    TransformSpec:
+
+        def make_spec() -> TransformSpec:
+            return TransformSpec(
+                name="my_transform",
+                use_gtpo=True,
+                post_process=my_hook,
+            )
+
+    TransformSpec fields:
+        name                str             Display name for logging.
+        use_gtpo            bool            Apply GTPO entropy weighting.
+        needs_planning      bool            Require planning token detection.
+        uses_sepa_controller bool           Activate SEPA scheduler.
+        apply_hicra         bool            Apply HICRA amplification.
+        entropy_transform   EntropyTransformFn | None   Custom entropy transform.
+        post_process        PostProcessFn | None        Final advantage hook.
+
+  3. Backend plugin
+
+    Set [backend].backend to a dotted path. Must implement the
+    TrainHelper protocol:
+
+        checkpoint(name)        Prepare backend state for sampling.
+        sample(...)             Sample completions with current adapter.
+        train_step(...)         Run one training step, return loss.
+        save_adapter(path,name) Persist adapter weights/state.
+        load_state(name)        Restore adapter weights/state.
+
+  4. Inference engine plugin
+
+    Set [inference].engine to a dotted path. Must subclass
+    InferenceEngine with:
+
+        generate(prompts, config) -> list[Completion]
+        load_adapter(path)        -> None
+
+  5. Reward plugin
+
+    Set reward_type = "custom", then specify:
+        custom_module    = "my_package.rewards"
+        custom_function  = "score"
+
+    Function signature:
+        (response: str, reference: str) -> float
+
+  6. Data source plugin
+
+    Set [data].source to a dotted path. Must expose:
+
+        load() -> list[Example]
+
+    Each Example has prompt (str) and reference (str) fields.
+
+  7. Planning detector plugin
+
+    Set [planning].detector to a dotted path. Must expose:
+
+        detect(tokens: list[str]) -> list[int]
+
+    Returns a list of 0/1 mask values (1 = planning token).
+
+GLOSSARY
+    RLVR    Reinforcement Learning with Verifiable Rewards. Training
+            paradigm where rewards come from programmatic verification.
+    GRPO    Group Relative Policy Optimization. Episode-level advantage
+            A_i = r_i - mean(r).
+    MaxRL   Inverse success-rate reweighting. A_i = (r_i - mean(r)) /
+            (mean(r) + eps).
+    GTPO    Generalized Token-level Policy Optimization. Entropy-weighted
+            credit assignment at the token level. Uses surprisal as
+            entropy proxy today; see uncertainty_kind.
+    HICRA   Hierarchical Credit Assignment. Planning token amplification
+            via a learned mask.
+    SEPA    Selective Entropy Pooling of Attention. Pools execution-token
+            uncertainty values to reduce variance while preserving
+            planning diversity. Uses surprisal today; full entropy
+            when backends provide token distributions.
+    LoRA    Low-Rank Adaptation. Parameter-efficient fine-tuning via
+            rank-decomposed weight updates.
+    SVD     Singular Value Decomposition. Used by LoRA-Squeeze for rank
+            analysis.
+    USL     Unified Scaling Law. Theoretical basis for the backpressure
+            adaptive batch sizing controller.
+
+SEE ALSO
+    docs/getting-started.md      Installation and first-run guide
+    docs/configuration.md        Full TOML reference
+    docs/capacity-planning.md    Capacity formulas and worker planning
+    docs/advantages.md           GRPO, MaxRL, GTPO, HICRA, SEPA
+    docs/sepa.md                 Selective Entropy Pooling details
+    docs/campaigns.md            Campaign sweep documentation
+    docs/tree.md                 Experiment tech tree
+    docs/squeeze.md              LoRA-Squeeze documentation
+    docs/rewards.md              Reward function reference
+    docs/inference-engines.md    Engine selection and multi-GPU setup
+    docs/backpressure.md         Adaptive batch sizing
+    docs/backends.md             Local vs Tinker backends
+    docs/logging.md              Metrics and wandb integration
+    docs/research-guide.md       Interpreting results, statistics
+
+AUTHORS
+    retrain is developed by Teilo Millet.
+    https://github.com/teilomillet/retrain

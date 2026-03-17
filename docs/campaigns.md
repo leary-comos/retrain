@@ -1,0 +1,208 @@
+# Campaigns
+
+The campaign orchestrator runs a full sweep of experimental conditions across multiple seeds — all from a single TOML file.
+
+## Quick start
+
+```bash
+retrain campaigns/pilot.toml
+```
+
+That's it. One command runs all conditions x seeds, with optional auto-squeeze and wandb logging.
+
+## Campaign TOML format
+
+A campaign TOML is a regular training config with an added `[campaign]` section:
+
+```toml
+[campaign]
+seeds = [42, 101, 202, 303]
+max_steps = 50
+
+[[campaign.conditions]]
+advantage_mode = "grpo"
+transform_mode = "none"
+
+[[campaign.conditions]]
+advantage_mode = "maxrl"
+transform_mode = "gtpo_sepa"
+
+# Everything below is the base training config for all runs
+
+[backend]
+backend = "tinker"
+
+[model]
+model = "Qwen/Qwen3-4B-Instruct-2507"
+lora_rank = 128
+
+[training]
+batch_size = 8
+group_size = 16
+max_tokens = 10240
+lr = 4e-5
+save_every = 20
+
+[sepa]
+steps = 50
+schedule = "linear"
+delay_steps = 10
+
+[squeeze]
+min_variance_retention = 0.95
+
+[logging]
+wandb_project = "sepa-pilot"
+```
+
+### `[campaign]` section
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `seeds` | list[int] | `[42, 101, 202, 303, 404, 505, 606, 707]` | RNG seeds for each run |
+| `max_steps` | int | `500` | Training steps per run (overrides `[training].max_steps`) |
+| `parallel` | bool | `false` | Run campaign conditions concurrently via subprocesses |
+| `max_workers` | int | `0` | Max concurrent subprocesses when `parallel = true`. `0` = launch all runs |
+| `stagger_seconds` | float | `0.0` | Delay between launching workers to reduce API bursts |
+
+#### Tinker backend throttling
+
+When running parallel campaigns against the Tinker backend, retrain automatically creates a shared lock directory (`tinker_throttle/` inside the campaign output) and limits how many subprocesses call the Tinker API simultaneously. This prevents the 502/504 errors that occurred when 12-15 workers hit the backend at once.
+
+| Key (in `[backend]`) | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_concurrent` | int | `4` | Max simultaneous Tinker API calls across all campaign workers |
+| `throttle_dir` | str | `""` | Path to shared lock directory. Auto-set by campaigns; leave empty for standalone runs |
+
+For most setups, the default `max_concurrent = 4` works well. Increase it if your Tinker endpoint has been scaled up; decrease it if you still see intermittent timeouts.
+
+```toml
+[campaign]
+parallel = true
+max_workers = 12
+
+[backend]
+backend = "tinker"
+max_concurrent = 4    # only 4 of the 12 workers call Tinker at a time
+```
+
+Standalone runs (no campaign) skip throttling entirely — there is zero overhead.
+
+### `[[campaign.conditions]]`
+
+Each condition is a table with two required keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `advantage_mode` | str | `grpo`, `maxrl`, or dotted plugin path (`my_module.my_advantage`) |
+| `transform_mode` | str | built-ins (`none`, `gtpo`, `gtpo_hicra`, `gtpo_sepa`, etc.) or dotted plugin path (`my_module.make_transform_spec`) |
+
+You can also use `algorithm_mode` in single-run configs to override the full
+pipeline; campaign defaults still use `advantage_mode + transform_mode`.
+
+If no conditions are specified, defaults to the 5-condition ablation:
+
+| # | `advantage_mode` | `transform_mode` | Label |
+|---|-------------------|-------------------|-------|
+| 1 | `grpo` | `none` | `grpo+none` |
+| 2 | `maxrl` | `none` | `maxrl+none` |
+| 3 | `maxrl` | `gtpo` | `maxrl+gtpo` |
+| 4 | `maxrl` | `gtpo_hicra` | `maxrl+gtpo_hicra` |
+| 5 | `maxrl` | `gtpo_sepa` | `maxrl+gtpo_sepa` |
+
+## Auto-squeeze
+
+Add a `[squeeze]` section to your campaign TOML to automatically find the optimal LoRA rank after the first run:
+
+```toml
+[model]
+lora_rank = 128          # train at high rank
+
+[squeeze]
+min_variance_retention = 0.95
+```
+
+After the first training run completes, retrain analyzes the adapter via SVD, prints a variance table, reports the recommended rank, and logs everything to wandb. The remaining campaign runs continue normally.
+
+The recommendation is also saved to `manifest.json` so you can retrieve it programmatically.
+
+See [LoRA-Squeeze](squeeze.md) for the full documentation: algorithm details, standalone usage, compression, configuration reference, and Python API.
+
+## Output structure
+
+Each campaign creates a timestamped directory under `logs/`:
+
+```
+logs/campaign_20260222_010127/
+├── manifest.json          # Campaign metadata + squeeze recommendation
+└── runs/
+    ├── grpo+none_s42/
+    │   ├── metrics.jsonl
+    │   └── emergence/
+    ├── grpo+none_s101/
+    ├── maxrl+gtpo_sepa_s42/
+    └── ...
+```
+
+### manifest.json
+
+Contains the full campaign configuration: timestamp, conditions, seeds, max steps, and run details. When auto-squeeze is enabled, also includes:
+
+```json
+{
+  "squeeze": {
+    "recommended_rank": 32
+  }
+}
+```
+
+## wandb integration
+
+When `wandb_project` is set in the base config, each training run gets:
+
+- **Run name**: `{condition}_s{seed}` (e.g., `maxrl+gtpo_sepa_s42`)
+- **Group**: `{condition}` (e.g., `maxrl+gtpo_sepa`) — groups runs across seeds
+- **Tags**: `{condition},seed{seed}` — for filtering
+
+Plus a **squeeze-analysis** run (if `[squeeze]` is configured) with the variance table and recommended rank.
+
+This makes it easy to compare conditions in the wandb dashboard: group by condition, then see variance across seeds.
+
+## Capacity planning
+
+Use capacity planning to size retrain campaign runs before you launch full seed sweeps:
+
+- `total_campaign_steps = num_conditions * num_seeds * max_steps`
+- `effective_parallelism = min(max_workers, total_runs)` when `parallel = true`, else `1`
+- `estimated_wall_time = total_campaign_steps * median_step_time / effective_parallelism`
+
+Suggested retrain flow:
+
+1. `retrain explain campaign.toml` to confirm condition count and run matrix.
+2. Run a short pilot campaign (`max_steps = 20-50` in TOML).
+3. Use `retrain status logs` and `metrics.jsonl` to estimate `median_step_time`.
+4. Set `parallel/max_workers/stagger_seconds` for the full run.
+
+See [Capacity Planning](capacity-planning.md) for the full workflow.
+
+## Compute budget
+
+Rough single-GPU estimates for Qwen3-4B with standard profile (`batch_size=8, group_size=16, max_tokens=10240`):
+
+| GPU | Per run (500 steps) | Full campaign (40 runs) |
+|-----|---------------------|------------------------|
+| RTX 4090 | ~6.3 h | ~250 h |
+| A100 | ~3.5 h | ~140 h |
+| H100 | ~2.1 h | ~84 h |
+
+Start small (`max_steps = 50`, 3-4 seeds) to validate your setup before committing to a full campaign.
+
+## The 5 conditions
+
+These conditions form a progressive ablation — from baseline GRPO to the full MaxRL+GTPO+SEPA pipeline. Each adds one component to isolate its contribution to reasoning performance:
+
+1. **`grpo+none`** — Baseline GRPO advantages, no token-level transforms
+2. **`maxrl+none`** — MaxRL advantages (inverse success-rate reweighting)
+3. **`maxrl+gtpo`** — Add entropy-weighted credit assignment
+4. **`maxrl+gtpo_hicra`** — Add planning token amplification
+5. **`maxrl+gtpo_sepa`** — Add selective entropy pooling (full pipeline)

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "retrain"
+version = "0.2.1"
+description = "RLVR training framework for LLMs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "transformers>=4.44.0",
+    "datasets>=2.20.0",
+    "peft>=0.12.0",
+    "safetensors>=0.4.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+local = ["torch>=2.4.0"]
+tinker = ["tinker>=0.13.1"]
+mlx = ["mlx-lm>=0.20.0; platform_system == 'Darwin'"]
+verifiers = ["verifiers>=0.1.0"]
+semantic = ["sentence-transformers>=5.2.3"]
+wandb = ["wandb>=0.17.0"]
+docs = ["mkdocs>=1.6,<2.0", "mkdocs-material>=9.5,<10.0"]
+all = ["retrain[local,tinker,mlx,verifiers,semantic,wandb]"]
+dev = ["retrain[all]", "pytest>=8.0.0", "ruff>=0.9.0", "ty>=0.0.14"]
+
+[project.scripts]
+retrain = "retrain.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["retrain"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ANN401", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any".msg = "Use precise aliases or protocols instead of typing.Any."
+"typing_extensions.Any".msg = "Use precise aliases or protocols instead of typing_extensions.Any."
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["prime_rl.configs.shared", "prime_rl.transport"]
